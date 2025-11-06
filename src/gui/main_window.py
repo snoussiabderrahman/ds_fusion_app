@@ -64,7 +64,7 @@ class MainWindow(QMainWindow):
         
         # Instructions
         instructions = QLabel("💡 Saisir l'assignation (ex: m1(A,B) = 0.5 ou m1(A) = 0)")
-        instructions.setStyleSheet("color: #7f8c8d; font-size: 11px;")
+        instructions.setStyleSheet("color: #7f8c8d; font-size: 13px;")
         mass_def_layout.addWidget(instructions)
         
         # Input et bouton
@@ -234,7 +234,7 @@ class MainWindow(QMainWindow):
         help_text.setStyleSheet("color: #7f8c8d; font-size: 10px; margin-top: 3px;")
         fusion_layout.addWidget(help_text)
         
-        self.fusion_button = QPushButton("🔀 FUSIONNER")
+        self.fusion_button = QPushButton("FUSIONNER")
         self.fusion_button.setObjectName("fusionButton")
         self.fusion_button.clicked.connect(self.perform_fusion)
         self.fusion_button.setMinimumHeight(45)
@@ -314,6 +314,17 @@ class MainWindow(QMainWindow):
                 return
             
             mass_name, subset_str, value = parse_mass_assignment(text)
+            
+            # VALIDATION : Vérifier que le nom de masse est valide
+            expected_masses = [f"m{i+1}" for i in range(self.num_masses)]
+            if mass_name not in expected_masses:
+                QMessageBox.critical(self, "Erreur", 
+                    f"La masse '{mass_name}' n'est pas valide.\n\n"
+                    f"Masses attendues : {', '.join(expected_masses)}\n\n"
+                    f"Vous avez défini {self.num_masses} masse(s). "
+                    f"Utilisez uniquement ces noms.")
+                return
+            
             subset = self.frame.parse_subset(subset_str)
             
             # Créer la masse si elle n'existe pas

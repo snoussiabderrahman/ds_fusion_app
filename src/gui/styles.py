@@ -9,7 +9,7 @@ QMainWindow {
 
 QGroupBox {
     font-weight: bold;
-    font-size: 13px;
+    font-size: 15px;
     border: 2px solid #3498db;
     border-radius: 6px;
     margin-top: 12px;

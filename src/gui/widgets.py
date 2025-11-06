@@ -149,15 +149,15 @@ class ResultDisplayWidget(QWidget):
         # Titre
         self.title_label = QLabel("📊 Résultat de Fusion")
         title_font = QFont()
-        title_font.setPointSize(13)
+        title_font.setPointSize(14)  # Augmenté de 13 à 14
         title_font.setBold(True)
         self.title_label.setFont(title_font)
         self.title_label.setStyleSheet("color: #2c3e50; background: transparent; border: none;")
         info_layout.addWidget(self.title_label)
         
-        # Informations détaillées
+        # Informations détaillées - AUGMENTER LA TAILLE
         self.info_label = QLabel()
-        self.info_label.setStyleSheet("color: #34495e; background: transparent; border: none; font-size: 11px;")
+        self.info_label.setStyleSheet("color: #34495e; background: transparent; border: none; font-size: 14px; line-height: 1.6;")  # Augmenté de 11px à 14px
         self.info_label.setWordWrap(True)
         info_layout.addWidget(self.info_label)
         
