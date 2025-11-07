@@ -5,6 +5,7 @@ from typing import List, Dict, FrozenSet
 from collections import defaultdict
 from .mass import Mass
 from .frame import FrameOfDiscernment
+import numpy as np
 
 
 class CombinationRule:
@@ -260,6 +261,148 @@ class PCR6Combination(CombinationRule):
         
         return result
 
+class ZhangCombination(CombinationRule):
+    """
+    Implémentation de la méthode proposée dans le papier (Zhang) :
+    1. Calculer les crédibilités
+    2. Calculer la masse pondérée
+    3. Appliquer Murphy sur la masse pondérée (k fois)
+    """
+    
+    def __init__(self):
+        super().__init__("Proposed Method")
+        # Vous pouvez instancier d'autres règles si nécessaire
+        self.murphy = MurphyCombination()
+    
+    def _calculate_credibility(self, masses: List[Mass]) -> List[float]:
+        """
+        Calcule le vecteur de crédibilité Crd
+        (Adapté de DSTheory.calculate_credibility)
+        """
+        # Recréer les matrices S et Sup basées sur les masses fournies
+        k = len(masses)
+        if k == 0: return []
+        
+        frame = masses[0].frame
+        S = np.ones((k, k))
+        
+        for i in range(k):
+            for j in range(k):
+                if i != j:
+                    # Utiliser une implémentation de cosine_similarity ici
+                    # Si cosine_similarity est une méthode statique ou disponible globalement
+                    pig1 = self._pignistic_transform(masses[i])
+                    pig2 = self._pignistic_transform(masses[j])
+                    dot_product = np.dot(pig1, pig2)
+                    norm1 = np.linalg.norm(pig1)
+                    norm2 = np.linalg.norm(pig2)
+                    similarity = dot_product / (norm1 * norm2) if norm1 != 0 and norm2 != 0 else 0
+                    S[i][j] = similarity
+        
+        Sup = np.sum(S, axis=1)
+        Sum_Sup = np.sum(Sup)
+        Crd = Sup / Sum_Sup if Sum_Sup > 0 else np.ones(k) / k
+        
+        return list(Crd) # Retourner une liste
+
+    def _pignistic_transform(self, mass: Mass) -> np.ndarray:
+        """
+        Transforme une masse en probabilité pignistique
+        (Adapté de DSTheory.pignistic_transform)
+        """
+        pignistic = np.zeros(len(mass.frame.hypotheses))
+        assignments = mass.get_all_masses_with_zeros() # Inclure les zéros pour la somme
+        
+        for hypothesis_subset, m_value in assignments.items():
+            if hypothesis_subset == mass.frame.get_theta() or m_value == 0:
+                continue
+                
+            elements = list(hypothesis_subset)
+            card = len(elements)
+            
+            if card > 0:
+                for elem in elements:
+                    try:
+                        idx = mass.frame.hypotheses.index(elem)
+                        pignistic[idx] += m_value / card
+                    except ValueError:
+                        # Element non trouvé dans le frame, ignorer
+                        continue
+        return pignistic
+
+    def _weighted_average_mass(self, masses: List[Mass], credibility: List[float]) -> Mass:
+        """
+        Calcule la moyenne pondérée des masses MAE(m)
+        (Adapté de DSTheory.weighted_average_mass)
+        """
+        if not masses:
+            raise ValueError("Aucune masse fournie pour la moyenne pondérée")
+        
+        frame = masses[0].frame
+        weighted_mass = Mass(frame, f"MAE({masses[0].name}...)")
+        
+        # Obtenir toutes les hypothèses et les zéros explicites
+        all_subsets = set()
+        for mass in masses:
+            all_subsets.update(mass.get_all_masses().keys())
+            all_subsets.update(mass.get_explicit_zeros())
+        
+        # Calculer la moyenne pondérée
+        for subset in all_subsets:
+            weighted_value = sum(
+                credibility[i] * masses[i].get_mass(subset) 
+                for i in range(len(masses))
+            )
+            weighted_mass.set_mass(subset, weighted_value)
+            
+        # Copier les zéros explicites si nécessaire (gestion par set_mass)
+        # Il faut s'assurer que le zéro explicite est bien conservé s'il l'est dans toutes les masses d'entrée
+        
+        return weighted_mass
+
+    def combine_two(self, m1: Mass, m2: Mass) -> Mass:
+        """Combine deux masses en utilisant la méthode proposée"""
+        # La méthode proposée combine plusieurs masses.
+        # Pour combiner deux masses m1 et m2, on les traite comme une liste.
+        return self.combine([m1, m2])
+
+    def combine(self, masses: List[Mass]) -> Mass:
+        """Combine plusieurs masses avec la méthode proposée"""
+        if not masses:
+            raise ValueError("Au moins une masse requise")
+        
+        # Étape 1: Calculer la crédibilité
+        # Il faut s'assurer que les masses ont le même cadre
+        frame = masses[0].frame
+        for m in masses[1:]:
+            if m.frame != frame:
+                raise ValueError("Toutes les masses doivent appartenir au même cadre de discernement.")
+        
+        credibility = self._calculate_credibility(masses)
+        
+        # Étape 2: Moyenne pondérée
+        weighted_mass = self._weighted_average_mass(masses, credibility)
+        
+        # Étape 3: Appliquer Murphy sur la masse pondérée
+        # Murphy combine k masses. Ici, on applique Murphy à une seule masse répétée k fois.
+        # Cela correspond à l'idée d'appliquer la combinaison sur la masse pondérée MAE(m) elle-même.
+        # On peut voir cela comme une itération de Murphy sur la masse pondérée.
+        result = weighted_mass.copy()
+        num_original_masses = len(masses) # On utilise le nombre original pour les itérations
+        for _ in range(num_original_masses - 1):
+             # Utilise la combinaison de Murphy sur la masse pondérée répétée
+            result = self.murphy.combine_two(result, weighted_mass)
+        
+        # Le résultat final est la combinaison de Murphy appliquée à la masse pondérée.
+        # La méthode de Murphy interne gère déjà la combinaison.
+        # Il faut s'assurer que le nom du résultat est approprié.
+        result.name = f"Proposed({masses[0].name}...)" 
+        
+        # Préserver les zéros explicites
+        self._preserve_explicit_zeros(result, masses)
+        
+        return result
+
 
 # Registry des règles disponibles
 COMBINATION_RULES = {
@@ -267,7 +410,8 @@ COMBINATION_RULES = {
     "Smets (TBM)": SmetsCombination(),
     "Yager": YagerCombination(),
     "Murphy": MurphyCombination(),
-    "PCR6": PCR6Combination()
+    "PCR6": PCR6Combination(),
+    "Zhang": ZhangCombination()
 }
 
 
