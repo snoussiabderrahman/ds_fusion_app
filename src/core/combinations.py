@@ -400,6 +400,175 @@ class ZhangCombination(CombinationRule):
         self._preserve_explicit_zeros(result, masses)
         
         return result
+    
+class HanCombination(CombinationRule):
+    """
+    Règle de Han et al. (2011)
+    "Weighted evidence combination based on distance of evidence and uncertainty measure"
+    
+    Combine la distance de Jousselme et la mesure d'ambiguïté (AM)
+    pour générer des poids optimaux
+    """
+    
+    def __init__(self):
+        super().__init__("Han")
+        self.dempster = DempsterCombination()
+    
+    def jousselme_distance(self, m1: Mass, m2: Mass) -> float:
+        """
+        Calcule la distance de Jousselme entre deux masses
+        d_J(m1,m2) = sqrt(0.5 * (m1-m2)^T * D * (m1-m2))
+        """
+        # Obtenir tous les sous-ensembles du power set
+        power_set = m1.frame.get_power_set()
+        n = len(power_set)
+        
+        # Créer les vecteurs de masse
+        vec1 = np.array([m1.get_mass(s) for s in power_set])
+        vec2 = np.array([m2.get_mass(s) for s in power_set])
+        
+        # Construire la matrice D (Jaccard similarity)
+        D = np.zeros((n, n))
+        for i, A in enumerate(power_set):
+            for j, B in enumerate(power_set):
+                if len(A) == 0 and len(B) == 0:
+                    D[i, j] = 0
+                elif len(A) == 0 or len(B) == 0:
+                    D[i, j] = 0
+                else:
+                    intersection = len(A & B)
+                    union = len(A | B)
+                    D[i, j] = intersection / union if union > 0 else 0
+        
+        # Calculer la distance
+        diff = vec1 - vec2
+        distance = np.sqrt(0.5 * np.dot(diff, np.dot(D, diff)))
+        
+        return distance
+    
+    def similarity(self, m1: Mass, m2: Mass) -> float:
+        """Similarité = 1 - distance de Jousselme"""
+        return 1.0 - self.jousselme_distance(m1, m2)
+    
+    def calculate_credibility_distance(self, masses: List[Mass]) -> np.ndarray:
+        """
+        Calcule la crédibilité basée sur la distance de Jousselme
+        Cred(mi) = Sup(mi) / Σ Sup(mj)
+        où Sup(mi) = Σ_{j≠i} Sim(mi, mj)
+        """
+        k = len(masses)
+        Sup = np.zeros(k)
+        
+        # Calculer le support pour chaque masse
+        for i in range(k):
+            for j in range(k):
+                if i != j:
+                    Sup[i] += self.similarity(masses[i], masses[j])
+        
+        # Normaliser
+        Sum_Sup = np.sum(Sup)
+        Cred = Sup / Sum_Sup if Sum_Sup > 0 else np.ones(k) / k
+        
+        return Cred
+    
+    def ambiguity_measure(self, mass: Mass) -> float:
+        """
+        Mesure d'ambiguïté (AM) basée sur la probabilité pignistique
+        AM(m) = -Σ BetP_m(θ) * log2(BetP_m(θ))
+        """
+        # Calculer les probabilités pignistiques
+        pignistic = {}
+        for hyp in mass.frame.hypotheses:
+            pignistic[hyp] = 0.0
+        
+        for subset, m_val in mass.get_all_masses().items():
+            if m_val == 0 or len(subset) == 0:
+                continue
+            card = len(subset)
+            for elem in subset:
+                pignistic[elem] += m_val / card
+        
+        # Calculer l'entropie
+        am = 0.0
+        for prob in pignistic.values():
+            if prob > 0:
+                am -= prob * np.log2(prob)
+        
+        return am
+    
+    def combine_two(self, m1: Mass, m2: Mass) -> Mass:
+        """Pour deux masses, utilise la méthode Han"""
+        return self.combine([m1, m2])
+    
+    def combine(self, masses: List[Mass]) -> Mass:
+        """
+        Combine plusieurs masses avec la méthode de Han:
+        1. Calcul des crédibilités via distance de Jousselme
+        2. Modification des poids via mesure d'ambiguïté
+        3. Moyenne pondérée
+        4. Application de Dempster n-1 fois
+        """
+        if len(masses) == 0:
+            raise ValueError("Au moins une masse requise")
+        
+        if len(masses) == 1:
+            return masses[0].copy()
+        
+        n = len(masses)
+        
+        # Étape 1: Calcul de la crédibilité basée sur la distance
+        Cred = self.calculate_credibility_distance(masses)
+        
+        # Étape 2: Calcul de la mesure d'ambiguïté pour chaque masse
+        AM = np.array([self.ambiguity_measure(m) for m in masses])
+        
+        # Normalisation de AM
+        Ent = AM / np.sum(AM) if np.sum(AM) > 0 else np.ones(n) / n
+        
+        # Calcul de ΔCred
+        avg_cred = np.mean(Cred)
+        Delta_Cred = Cred - avg_cred
+        
+        # Modification des crédibilités avec fonction exponentielle
+        # Credm(mi) = Cred(mi) × Ent(mi)^(-ΔCred(mi))
+        Credm = np.zeros(n)
+        for i in range(n):
+            if Ent[i] > 0:
+                Credm[i] = Cred[i] * (Ent[i] ** (-Delta_Cred[i]))
+            else:
+                Credm[i] = Cred[i]
+        
+        # Normalisation finale
+        Credmn = Credm / np.sum(Credm) if np.sum(Credm) > 0 else np.ones(n) / n
+        
+        # Étape 3: Moyenne pondérée
+        weighted_mass = Mass(masses[0].frame, "m_weighted_Han")
+        
+        # Obtenir tous les sous-ensembles
+        all_hypotheses = set()
+        for mass in masses:
+            all_hypotheses.update(mass.get_all_masses().keys())
+            all_hypotheses.update(mass.get_explicit_zeros())
+        
+        # Calculer la moyenne pondérée
+        for hyp in all_hypotheses:
+            weighted_value = sum(
+                Credmn[i] * masses[i].get_mass(hyp)
+                for i in range(n)
+            )
+            weighted_mass.set_mass(hyp, weighted_value)
+        
+        # Étape 4: Appliquer Dempster n-1 fois
+        result = weighted_mass.copy()
+        result.name = f"Han({','.join(m.name for m in masses)})"
+        
+        for _ in range(n - 1):
+            result = self.dempster.combine_two(result, weighted_mass)
+        
+        # Préserver les zéros explicites
+        self._preserve_explicit_zeros(result, masses)
+        
+        return result
 
 
 # Registry des règles disponibles
@@ -409,7 +578,8 @@ COMBINATION_RULES = {
     "Yager": YagerCombination(),
     "Murphy": MurphyCombination(),
     "PCR6": PCR6Combination(),
-    "Zhang": ZhangCombination()
+    "Zhang": ZhangCombination(),
+    "Han": HanCombination()
 }
 
 
