@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QFileDialog, QSplitter, QScrollArea, QGridLayout,
                              QTableWidget, QTableWidgetItem, QHeaderView)
 from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QFont
+from PyQt5.QtGui import QFont 
 from .styles import MAIN_STYLE
 from .widgets import  ResultDisplayWidget, MassCardWidget
 from ..core.frame import FrameOfDiscernment
