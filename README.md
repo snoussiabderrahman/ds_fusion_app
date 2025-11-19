@@ -16,6 +16,19 @@ This application provides a user-friendly interface to perform the Dempster-Shaf
 -   **Result Visualization**: Clear display of fusion results with percentages.
 -   **Build & Distribute**: Package the application into a standalone executable using PyInstaller.
 
+---
+
+## Screenshots
+
+Here are some screenshots to illustrate the application's interface and workflow:
+
+### Main Window Overview
+
+![Main Window](resources/main_window.png)
+*The main application window, showing frame definition, mass input, and fusion controls.*
+
+---
+
 ## Requirements
 
 *   Python 3.7+

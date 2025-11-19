@@ -261,6 +261,101 @@ class PCR6Combination(CombinationRule):
         
         return result
 
+class DengCombination(CombinationRule):
+    """Règle de Deng (distance de Jousselme)
+    - calcule les distances Jousselme entre toutes les paires de masses
+    - transforme en similarités S = 1 - d
+    - calcule Supp(i) = sum_{j != i} S(i,j) et les poids normalisés
+    - construit la masse moyenne pondérée
+    - applique Dempster (comme Murphy) en combinant la masse moyenne k-1 fois
+    """
+    def __init__(self):
+        super().__init__("Deng")
+        self.dempster = DempsterCombination()
+
+    def _build_vectors_and_D(self, masses: List[Mass]):
+        # construit les vecteurs (selon power_set) et la matrice D (Jousselme)
+        frame = masses[0].frame
+        power_set = frame.get_power_set()  # liste de frozenset (exclut ∅)
+        n_ps = len(power_set)
+
+        # vecteurs de masse (k x n_ps)
+        k = len(masses)
+        vecs = np.zeros((k, n_ps))
+        for i, m in enumerate(masses):
+            for j, subset in enumerate(power_set):
+                vecs[i, j] = m.get_mass(subset)
+
+        # matrice D (n_ps x n_ps) : D(A,B) = |A ∩ B| / |A ∪ B|
+        D = np.zeros((n_ps, n_ps))
+        for a, A in enumerate(power_set):
+            for b, B in enumerate(power_set):
+                if len(A) == 0 or len(B) == 0:
+                    D[a, b] = 0.0
+                else:
+                    inter = len(A & B)
+                    union = len(A | B)
+                    D[a, b] = (inter / union) if union > 0 else 0.0
+
+        return frame, power_set, vecs, D
+
+    def _jousselme_distance_matrix(self, vecs: np.ndarray, D: np.ndarray) -> np.ndarray:
+        k = vecs.shape[0]
+        DIM = np.zeros((k, k))
+        for i in range(k):
+            for j in range(k):
+                diff = vecs[i] - vecs[j]
+                DIM[i, j] = np.sqrt(0.5 * float(np.dot(diff, np.dot(D, diff))))
+        return DIM
+
+    def combine(self, masses: List[Mass]) -> Mass:
+        if len(masses) == 0:
+            raise ValueError("Au moins une masse requise")
+        if len(masses) == 1:
+            return masses[0].copy()
+
+        k = len(masses)
+        frame, power_set, vecs, D = self._build_vectors_and_D(masses)
+
+        # matrice des distances et similarités
+        DIM = self._jousselme_distance_matrix(vecs, D)
+        SIM = 1.0 - DIM
+
+        # degré de support Supp(i) = sum_{j != i} SIM[i,j]
+        diag = np.diag(SIM)
+        Sup = np.sum(SIM, axis=1) - diag  # exclut la diagonale
+        Sum_Sup = float(np.sum(Sup))
+        if Sum_Sup > 0:
+            weights = Sup / Sum_Sup
+        else:
+            weights = np.ones(k) / k
+
+        # construire la masse moyenne pondérée
+        weighted_mass = Mass(frame, "m_weighted_Deng")
+        # collecter tous les sous-ensembles définis (focaux + zéros explicites)
+        all_subsets = set()
+        for m in masses:
+            all_subsets.update(m.get_all_masses().keys())
+            all_subsets.update(m.get_explicit_zeros())
+
+        for subset in all_subsets:
+            wval = sum(weights[i] * masses[i].get_mass(subset)
+                       for i in range(k))
+            weighted_mass.set_mass(subset, float(wval))
+
+        # appliquer Dempster k-1 fois (comme Murphy)
+        result = weighted_mass.copy()
+        for _ in range(k - 1):
+            result = self.dempster.combine_two(result, weighted_mass)
+
+        # préserver zéros explicites
+        self._preserve_explicit_zeros(result, masses)
+
+        return result
+
+    def combine_two(self, m1: Mass, m2: Mass) -> Mass:
+        return self.combine([m1, m2])
+
 class ZhangCombination(CombinationRule):
     """
     Règle de Zhang (méthode proposée dans le papier)
@@ -578,6 +673,7 @@ COMBINATION_RULES = {
     "Yager": YagerCombination(),
     "Murphy": MurphyCombination(),
     "PCR6": PCR6Combination(),
+    "Deng": DengCombination(),
     "Zhang": ZhangCombination(),
     "Han": HanCombination()
 }
