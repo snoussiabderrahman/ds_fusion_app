@@ -1,6 +1,3 @@
-"""
-Module pour parser les expressions de fusion
-"""
 import re
 from typing import List, Tuple
 

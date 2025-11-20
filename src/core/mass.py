@@ -1,6 +1,3 @@
-"""
-Module pour gérer les fonctions de masse (BBA - Basic Belief Assignment)
-"""
 from typing import Dict, FrozenSet, Set
 from .frame import FrameOfDiscernment
 

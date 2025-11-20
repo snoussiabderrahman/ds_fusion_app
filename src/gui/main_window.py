@@ -1,6 +1,3 @@
-"""
-Fenêtre principale remaniée — look professionnel, menu, toolbar, splitter, statusbar
-"""
 import sys
 import os
 from PyQt5.QtWidgets import (

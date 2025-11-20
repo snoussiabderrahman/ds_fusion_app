@@ -1,6 +1,3 @@
-"""
-Module pour gérer le cadre de discernement (Frame of Discernment)
-"""
 from itertools import chain, combinations
 from typing import Set, FrozenSet, List
 

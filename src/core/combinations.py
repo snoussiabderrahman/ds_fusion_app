@@ -1,6 +1,3 @@
-"""
-Module contenant les règles de combinaison
-"""
 from typing import List, Dict, FrozenSet
 from collections import defaultdict
 from .mass import Mass

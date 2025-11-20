@@ -1,6 +1,3 @@
-"""
-Widgets remaniés : cartes de masse sobres et affichage de résultat professionnel
-"""
 from PyQt5.QtWidgets import (
     QWidget,
     QVBoxLayout,

@@ -1,6 +1,3 @@
-"""
-Styles professionnels pour l'interface graphique (thème clair, sobre)
-"""
 MAIN_STYLE = """
 /* Fenêtre principale */
 QMainWindow {

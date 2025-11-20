@@ -1,6 +1,3 @@
-"""
-Module pour gérer l'import/export CSV
-"""
 import pandas as pd
 from typing import Dict, List
 from ..core.mass import Mass
