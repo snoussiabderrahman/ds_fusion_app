@@ -4,6 +4,31 @@ from .mass import Mass
 from .frame import FrameOfDiscernment
 import numpy as np
 
+def get_ordered_powerset(frame: 'FrameOfDiscernment') -> List[FrozenSet]:
+    """Retourne le power set dans un ordre déterministe (vital pour Jousselme)"""
+    # Suppose que frame.get_power_set() retourne une liste de frozensets
+    # On trie par taille, puis par représentation string pour être déterministe
+    pset = list(frame.get_power_set())
+    # Note: On s'assure que l'ensemble vide n'est PAS inclus si get_power_set l'exclut
+    # Jousselme travaille généralement sur 2^Theta \ {vide} pour la distance
+    return sorted(pset, key=lambda x: (len(x), str(sorted(list(x)))))
+
+def compute_jousselme_matrix(ordered_pset: List[FrozenSet]) -> np.ndarray:
+    n = len(ordered_pset)
+    D = np.zeros((n, n))
+    for i, A in enumerate(ordered_pset):
+        for j, B in enumerate(ordered_pset):
+            if not A and not B: # Cas vide/vide (ne devrait pas arriver si exclu)
+                D[i,j] = 1.0
+                continue
+            
+            inter = len(A & B)
+            union = len(A | B)
+            D[i, j] = inter / union if union > 0 else 0.0
+    return D
+
+def mass_to_vector(mass: 'Mass', ordered_pset: List[FrozenSet]) -> np.ndarray:
+    return np.array([mass.get_mass(s) for s in ordered_pset])
 
 class CombinationRule:
     """Classe de base pour les règles de combinaison"""
@@ -33,16 +58,17 @@ class DempsterCombination(CombinationRule):
     def __init__(self):
         super().__init__("Dempster-Shafer")
     
-    def combine_two(self, m1: Mass, m2: Mass) -> Mass:
-        """Combine deux masses avec la règle de Dempster"""
+    def combine_two(self, m1: 'Mass', m2: 'Mass') -> 'Mass':
         result = Mass(m1.frame, f"{m1.name}⊕{m2.name}")
-        
-        # Calcul conjunctif
         assignments = defaultdict(float)
-        K = 0.0  # Conflit
+        K = 0.0
         
-        for B, m1_val in m1.get_all_masses().items():
-            for C, m2_val in m2.get_all_masses().items():
+        # Récupération sécurisée des masses
+        masses1 = m1.get_all_masses()
+        masses2 = m2.get_all_masses()
+        
+        for B, m1_val in masses1.items():
+            for C, m2_val in masses2.items():
                 intersection = B & C
                 product = m1_val * m2_val
                 
@@ -51,17 +77,18 @@ class DempsterCombination(CombinationRule):
                 else:
                     assignments[intersection] += product
         
-        # Normalisation
-        if abs(K - 1.0) < 1e-10:
-            raise ValueError("Conflit total (K=1), règle de Dempster non définie")
-        
+        # Gestion de la tolérance numérique pour K
+        if K > 1.0 - 1e-10:
+             # Cas limite : conflit quasi total
+             # Pour éviter le crash dans les itérations Murphy si le conflit est très élevé
+             # on peut retourner une masse vacueuse ou lever une erreur
+             raise ValueError(f"Conflit total détecté (K={K})")
+             
         denom = 1.0 - K
         for subset, value in assignments.items():
             result.set_mass(subset, value / denom)
         
-        # Préserver les zéros explicites
         self._preserve_explicit_zeros(result, [m1, m2])
-        
         return result
     
     def combine(self, masses: List[Mass]) -> Mass:
@@ -259,407 +286,235 @@ class PCR6Combination(CombinationRule):
         return result
 
 class DengCombination(CombinationRule):
-    """Règle de Deng (distance de Jousselme)
-    - calcule les distances Jousselme entre toutes les paires de masses
-    - transforme en similarités S = 1 - d
-    - calcule Supp(i) = sum_{j != i} S(i,j) et les poids normalisés
-    - construit la masse moyenne pondérée
-    - applique Dempster (comme Murphy) en combinant la masse moyenne k-1 fois
+    """
+    Règle de Deng (2004) : Moyenne pondérée par distance Jousselme.
+    Support = Somme des similarités (SANS diagonale, i.e., j != i).
     """
     def __init__(self):
         super().__init__("Deng")
         self.dempster = DempsterCombination()
 
-    def _build_vectors_and_D(self, masses: List[Mass]):
-        # construit les vecteurs (selon power_set) et la matrice D (Jousselme)
-        frame = masses[0].frame
-        power_set = frame.get_power_set()  # liste de frozenset (exclut ∅)
-        n_ps = len(power_set)
-
-        # vecteurs de masse (k x n_ps)
+    def combine(self, masses: List['Mass']) -> 'Mass':
+        if not masses: raise ValueError("Aucune masse")
+        if len(masses) == 1: return masses[0].copy()
+        
+        # 1. Préparation Jousselme
+        pset = get_ordered_powerset(masses[0].frame)
+        D = compute_jousselme_matrix(pset)
+        vectors = np.array([mass_to_vector(m, pset) for m in masses])
         k = len(masses)
-        vecs = np.zeros((k, n_ps))
-        for i, m in enumerate(masses):
-            for j, subset in enumerate(power_set):
-                vecs[i, j] = m.get_mass(subset)
-
-        # matrice D (n_ps x n_ps) : D(A,B) = |A ∩ B| / |A ∪ B|
-        D = np.zeros((n_ps, n_ps))
-        for a, A in enumerate(power_set):
-            for b, B in enumerate(power_set):
-                if len(A) == 0 or len(B) == 0:
-                    D[a, b] = 0.0
-                else:
-                    inter = len(A & B)
-                    union = len(A | B)
-                    D[a, b] = (inter / union) if union > 0 else 0.0
-
-        return frame, power_set, vecs, D
-
-    def _jousselme_distance_matrix(self, vecs: np.ndarray, D: np.ndarray) -> np.ndarray:
-        k = vecs.shape[0]
-        DIM = np.zeros((k, k))
+        
+        # 2. Matrice de distance et similarité
+        # Distance Jousselme : d_ij = sqrt(0.5 * (mi-mj)^T * D * (mi-mj))
+        SIM = np.zeros((k, k))
         for i in range(k):
             for j in range(k):
-                diff = vecs[i] - vecs[j]
-                DIM[i, j] = np.sqrt(0.5 * float(np.dot(diff, np.dot(D, diff))))
-        return DIM
-
-    def combine(self, masses: List[Mass]) -> Mass:
-        if len(masses) == 0:
-            raise ValueError("Au moins une masse requise")
-        if len(masses) == 1:
-            return masses[0].copy()
-
-        k = len(masses)
-        frame, power_set, vecs, D = self._build_vectors_and_D(masses)
-
-        # matrice des distances et similarités
-        DIM = self._jousselme_distance_matrix(vecs, D)
-        SIM = 1.0 - DIM
-
-        # degré de support Supp(i) = sum_{j != i} SIM[i,j]
-        diag = np.diag(SIM)
-        Sup = np.sum(SIM, axis=1) - diag  # exclut la diagonale
-        Sum_Sup = float(np.sum(Sup))
-        if Sum_Sup > 0:
-            weights = Sup / Sum_Sup
+                if i == j:
+                    SIM[i, j] = 1.0
+                    continue
+                diff = vectors[i] - vectors[j]
+                # Calcul matriciel optimisé : v @ D @ v.T
+                dist_sq = 0.5 * (diff @ D @ diff.T)
+                # Protection racine carrée négative due aux flottants
+                dist = np.sqrt(max(0.0, dist_sq))
+                SIM[i, j] = 1.0 - dist
+        
+        # 3. Poids (Deng: j != i)
+        # On soustrait la diagonale (qui vaut 1) de la somme de la ligne
+        Sup = np.sum(SIM, axis=1) - 1.0
+        
+        sum_sup = np.sum(Sup)
+        if sum_sup == 0:
+            Crd = np.ones(k) / k
         else:
-            weights = np.ones(k) / k
-
-        # construire la masse moyenne pondérée
-        weighted_mass = Mass(frame, "m_weighted_Deng")
-        # collecter tous les sous-ensembles définis (focaux + zéros explicites)
-        all_subsets = set()
-        for m in masses:
-            all_subsets.update(m.get_all_masses().keys())
-            all_subsets.update(m.get_explicit_zeros())
-
-        for subset in all_subsets:
-            wval = sum(weights[i] * masses[i].get_mass(subset)
-                       for i in range(k))
-            weighted_mass.set_mass(subset, float(wval))
-
-        # appliquer Dempster k-1 fois (comme Murphy)
-        result = weighted_mass.copy()
+            Crd = Sup / sum_sup
+            
+        # 4. Moyenne pondérée
+        avg_mass = Mass(masses[0].frame, "Average_Deng")
+        # Union de toutes les focales
+        all_focals = set().union(*[m.get_all_masses().keys() for m in masses])
+        
+        for focal in all_focals:
+            val = sum(Crd[i] * masses[i].get_mass(focal) for i in range(k))
+            if val > 0:
+                avg_mass.set_mass(focal, val)
+                
+        # 5. Fusion N-1 fois (Murphy)
+        result = avg_mass.copy()
         for _ in range(k - 1):
-            result = self.dempster.combine_two(result, weighted_mass)
-
-        # préserver zéros explicites
+            result = self.dempster.combine_two(result, avg_mass)
+            
         self._preserve_explicit_zeros(result, masses)
-
         return result
-
-    def combine_two(self, m1: Mass, m2: Mass) -> Mass:
-        return self.combine([m1, m2])
 
 class ZhangCombination(CombinationRule):
     """
-    Règle de Zhang (méthode proposée dans le papier)
-    Basée sur la transformation pignistique et la similarité cosinus
+    Règle de Zhang (2014) : Moyenne pondérée par Cosinus sur Pignistic.
+    Support = Somme des similarités (AVEC diagonale, i.e., incluant i=i).
     """
-    
     def __init__(self):
         super().__init__("Zhang")
         self.dempster = DempsterCombination()
-    
-    def pignistic_transform(self, mass: Mass) -> np.ndarray:
-        """
-        Transforme une masse en probabilité pignistique
-        Returns: vecteur numpy de dimension n (nombre d'hypothèses)
-        """
-        n = mass.frame.n
-        pignistic = np.zeros(n)
+
+    def get_pignistic_vector(self, mass: 'Mass') -> np.ndarray:
+        # L'ordre doit être celui de frame.hypotheses
+        # frame.hypotheses doit être une liste ordonnée des singletons (ex: ['A', 'B', 'C'])
+        hyp_list = list(mass.frame.hypotheses) # Assurer liste stable
+        vec = np.zeros(len(hyp_list))
         
-        for hypothesis, m_value in mass.get_all_masses().items():
-            if m_value == 0:
-                continue
-            
-            # Cardinalité du sous-ensemble
-            card = len(hypothesis)
-            
-            if card > 0:
-                # Distribuer équitablement sur chaque élément
-                for elem in hypothesis:
-                    idx = mass.frame.hypotheses.index(elem)
-                    pignistic[idx] += m_value / card
+        for subset, val in mass.get_all_masses().items():
+            if val > 0 and len(subset) > 0:
+                split_val = val / len(subset)
+                for elem in subset:
+                    try:
+                        idx = hyp_list.index(elem)
+                        vec[idx] += split_val
+                    except ValueError:
+                        pass # Élément inconnu du frame ?
+        return vec
+
+    def combine(self, masses: List['Mass']) -> 'Mass':
+        if not masses: raise ValueError("Aucune masse")
+        if len(masses) == 1: return masses[0].copy()
         
-        return pignistic
-    
-    def cosine_similarity(self, mass1: Mass, mass2: Mass) -> float:
-        """
-        Calcule la similarité cosinus entre deux masses
-        via leurs transformations pignistiques
-        """
-        pig1 = self.pignistic_transform(mass1)
-        pig2 = self.pignistic_transform(mass2)
-        
-        dot_product = np.dot(pig1, pig2)
-        norm1 = np.linalg.norm(pig1)
-        norm2 = np.linalg.norm(pig2)
-        
-        if norm1 == 0 or norm2 == 0:
-            return 0.0
-        
-        return dot_product / (norm1 * norm2)
-    
-    def build_correlation_matrix(self, masses: List[Mass]) -> np.ndarray:
-        """
-        Construit la matrice de corrélation S
-        S[i][j] = similarité cosinus entre masses[i] et masses[j]
-        """
         k = len(masses)
-        S = np.ones((k, k))
+        pig_vectors = [self.get_pignistic_vector(m) for m in masses]
         
+        # 1. Matrice de similarité Cosinus
+        SIM = np.zeros((k, k))
         for i in range(k):
             for j in range(k):
-                if i != j:
-                    S[i][j] = self.cosine_similarity(masses[i], masses[j])
+                # Dot product
+                dot = np.dot(pig_vectors[i], pig_vectors[j])
+                norm_i = np.linalg.norm(pig_vectors[i])
+                norm_j = np.linalg.norm(pig_vectors[j])
+                
+                if norm_i > 0 and norm_j > 0:
+                    SIM[i, j] = dot / (norm_i * norm_j)
+                else:
+                    SIM[i, j] = 0.0 # Cas pathologique masse nulle
         
-        return S
-    
-    def calculate_credibility(self, masses: List[Mass]) -> np.ndarray:
-        """
-        Calcule le vecteur de crédibilité Crd
-        basé sur le support mutuel entre les masses
-        """
-        S = self.build_correlation_matrix(masses)
-        k = len(masses)
+        # 2. Support (Zhang: AVEC diagonale)
+        # Le papier dit "correlation matrix S... elements on diagonal are 1"
+        # "Sum of elements in row i is degree of support"
+        Sup = np.sum(SIM, axis=1)
         
-        # Calcul du vecteur de support Sup (somme sur chaque ligne)
-        Sup = np.sum(S, axis=1)
+        sum_sup = np.sum(Sup)
+        if sum_sup == 0:
+            Crd = np.ones(k) / k
+        else:
+            Crd = Sup / sum_sup
+            
+        # 3. Moyenne pondérée
+        avg_mass = Mass(masses[0].frame, "Average_Zhang")
+        all_focals = set().union(*[m.get_all_masses().keys() for m in masses])
         
-        # Normalisation
-        Sum_Sup = np.sum(Sup)
-        Crd = Sup / Sum_Sup if Sum_Sup > 0 else np.ones(k) / k
-        
-        return Crd
-    
-    def weighted_average_mass(self, masses: List[Mass], credibility: np.ndarray) -> Mass:
-        """
-        Calcule la moyenne pondérée des masses MAE(m)
-        selon les crédibilités calculées
-        """
-        weighted_mass = Mass(masses[0].frame, "m_weighted")
-        
-        # Obtenir tous les sous-ensembles présents
-        all_hypotheses = set()
-        for mass in masses:
-            all_hypotheses.update(mass.get_all_masses().keys())
-            all_hypotheses.update(mass.get_explicit_zeros())
-        
-        # Calculer la moyenne pondérée
-        for hyp in all_hypotheses:
-            weighted_value = sum(
-                credibility[i] * masses[i].get_mass(hyp)
-                for i in range(len(masses))
-            )
-            weighted_mass.set_mass(hyp, weighted_value)
-        
-        return weighted_mass
-    
-    def combine_two(self, m1: Mass, m2: Mass) -> Mass:
-        """Pour deux masses, utilise la méthode proposée"""
-        return self.combine([m1, m2])
-    
-    def combine(self, masses: List[Mass]) -> Mass:
-        """
-        Combine plusieurs masses avec la méthode proposée:
-        1. Calcul des crédibilités via similarité cosinus
-        2. Moyenne pondérée des masses
-        3. Application de Murphy sur la masse pondérée
-        """
-        if len(masses) == 0:
-            raise ValueError("Au moins une masse requise")
-        
-        if len(masses) == 1:
-            return masses[0].copy()
-        
-        # Étape 1: Calculer les crédibilités
-        credibility = self.calculate_credibility(masses)
-        
-        # Étape 2: Moyenne pondérée
-        weighted_mass = self.weighted_average_mass(masses, credibility)
-        
-        # Étape 3: Appliquer Dempster k fois sur la masse pondérée
-        result = weighted_mass.copy()
-        result.name = f"Zhang({','.join(m.name for m in masses)})"
-        
-        for _ in range(len(masses) - 1):
-            result = self.dempster.combine_two(result, weighted_mass)
-        
-        # Préserver les zéros explicites
+        for focal in all_focals:
+            val = sum(Crd[i] * masses[i].get_mass(focal) for i in range(k))
+            if val > 0:
+                avg_mass.set_mass(focal, val)
+                
+        # 4. Fusion N-1 fois
+        result = avg_mass.copy()
+        for _ in range(k - 1):
+            result = self.dempster.combine_two(result, avg_mass)
+            
         self._preserve_explicit_zeros(result, masses)
-        
         return result
-    
+
 class HanCombination(CombinationRule):
     """
-    Règle de Han et al. (2011)
-    "Weighted evidence combination based on distance of evidence and uncertainty measure"
-    
-    Combine la distance de Jousselme et la mesure d'ambiguïté (AM)
-    pour générer des poids optimaux
+    Règle de Han (2011) : Distance Jousselme + Mesure d'Incertitude (AM).
+    Poids modifiés par une fonction puissance de l'entropie normalisée.
     """
-    
     def __init__(self):
         super().__init__("Han")
         self.dempster = DempsterCombination()
-    
-    def jousselme_distance(self, m1: Mass, m2: Mass) -> float:
-        """
-        Calcule la distance de Jousselme entre deux masses
-        d_J(m1,m2) = sqrt(0.5 * (m1-m2)^T * D * (m1-m2))
-        """
-        # Obtenir tous les sous-ensembles du power set
-        power_set = m1.frame.get_power_set()
-        n = len(power_set)
+
+    def get_ambiguity_measure(self, mass: 'Mass') -> float:
+        # AM(m) = - sum( BetP(x) * log2(BetP(x)) )
+        # On réutilise la logique pignistique (locale pour éviter dépendance)
+        hyp_list = list(mass.frame.hypotheses)
+        vec = np.zeros(len(hyp_list))
         
-        # Créer les vecteurs de masse
-        vec1 = np.array([m1.get_mass(s) for s in power_set])
-        vec2 = np.array([m2.get_mass(s) for s in power_set])
-        
-        # Construire la matrice D (Jaccard similarity)
-        D = np.zeros((n, n))
-        for i, A in enumerate(power_set):
-            for j, B in enumerate(power_set):
-                if len(A) == 0 and len(B) == 0:
-                    D[i, j] = 0
-                elif len(A) == 0 or len(B) == 0:
-                    D[i, j] = 0
-                else:
-                    intersection = len(A & B)
-                    union = len(A | B)
-                    D[i, j] = intersection / union if union > 0 else 0
-        
-        # Calculer la distance
-        diff = vec1 - vec2
-        distance = np.sqrt(0.5 * np.dot(diff, np.dot(D, diff)))
-        
-        return distance
-    
-    def similarity(self, m1: Mass, m2: Mass) -> float:
-        """Similarité = 1 - distance de Jousselme"""
-        return 1.0 - self.jousselme_distance(m1, m2)
-    
-    def calculate_credibility_distance(self, masses: List[Mass]) -> np.ndarray:
-        """
-        Calcule la crédibilité basée sur la distance de Jousselme
-        Cred(mi) = Sup(mi) / Σ Sup(mj)
-        où Sup(mi) = Σ_{j≠i} Sim(mi, mj)
-        """
+        for subset, val in mass.get_all_masses().items():
+            if val > 0 and len(subset) > 0:
+                split = val / len(subset)
+                for elem in subset:
+                    vec[hyp_list.index(elem)] += split
+                    
+        am = 0.0
+        for p in vec:
+            if p > 1e-10: # Éviter log(0)
+                am -= p * np.log2(p)
+        return am
+
+    def combine(self, masses: List['Mass']) -> 'Mass':
+        if not masses: raise ValueError("Aucune masse")
         k = len(masses)
-        Sup = np.zeros(k)
         
-        # Calculer le support pour chaque masse
+        # 1. Poids de base (comme Deng)
+        # Han utilise la distance pour le Cred initial
+        pset = get_ordered_powerset(masses[0].frame)
+        D = compute_jousselme_matrix(pset)
+        vectors = np.array([mass_to_vector(m, pset) for m in masses])
+        
+        SIM = np.zeros((k, k))
         for i in range(k):
             for j in range(k):
-                if i != j:
-                    Sup[i] += self.similarity(masses[i], masses[j])
+                if i == j: 
+                    SIM[i, j] = 1.0
+                    continue
+                diff = vectors[i] - vectors[j]
+                dist = np.sqrt(max(0.0, 0.5 * (diff @ D @ diff.T)))
+                SIM[i, j] = 1.0 - dist
+                
+        # Han utilise le support SANS diagonale pour le Cred initial (comme Deng)
+        Sup = np.sum(SIM, axis=1) - 1.0
+        sum_sup = np.sum(Sup)
+        Cred = Sup / sum_sup if sum_sup > 0 else np.ones(k)/k
         
-        # Normaliser
-        Sum_Sup = np.sum(Sup)
-        Cred = Sup / Sum_Sup if Sum_Sup > 0 else np.ones(k) / k
+        # 2. Mesure d'Incertitude (AM)
+        AM = np.array([self.get_ambiguity_measure(m) for m in masses])
+        sum_am = np.sum(AM)
+        # Normalisation Ent(mi)
+        Ent = AM / sum_am if sum_am > 0 else np.ones(k)/k
         
-        return Cred
-    
-    def ambiguity_measure(self, mass: Mass) -> float:
-        """
-        Mesure d'ambiguïté (AM) basée sur la probabilité pignistique
-        AM(m) = -Σ BetP_m(θ) * log2(BetP_m(θ))
-        """
-        # Calculer les probabilités pignistiques
-        pignistic = {}
-        for hyp in mass.frame.hypotheses:
-            pignistic[hyp] = 0.0
-        
-        for subset, m_val in mass.get_all_masses().items():
-            if m_val == 0 or len(subset) == 0:
-                continue
-            card = len(subset)
-            for elem in subset:
-                pignistic[elem] += m_val / card
-        
-        # Calculer l'entropie
-        am = 0.0
-        for prob in pignistic.values():
-            if prob > 0:
-                am -= prob * np.log2(prob)
-        
-        return am
-    
-    def combine_two(self, m1: Mass, m2: Mass) -> Mass:
-        """Pour deux masses, utilise la méthode Han"""
-        return self.combine([m1, m2])
-    
-    def combine(self, masses: List[Mass]) -> Mass:
-        """
-        Combine plusieurs masses avec la méthode de Han:
-        1. Calcul des crédibilités via distance de Jousselme
-        2. Modification des poids via mesure d'ambiguïté
-        3. Moyenne pondérée
-        4. Application de Dempster n-1 fois
-        """
-        if len(masses) == 0:
-            raise ValueError("Au moins une masse requise")
-        
-        if len(masses) == 1:
-            return masses[0].copy()
-        
-        n = len(masses)
-        
-        # Étape 1: Calcul de la crédibilité basée sur la distance
-        Cred = self.calculate_credibility_distance(masses)
-        
-        # Étape 2: Calcul de la mesure d'ambiguïté pour chaque masse
-        AM = np.array([self.ambiguity_measure(m) for m in masses])
-        
-        # Normalisation de AM
-        Ent = AM / np.sum(AM) if np.sum(AM) > 0 else np.ones(n) / n
-        
-        # Calcul de ΔCred
-        avg_cred = np.mean(Cred)
+        # 3. Modification des poids (Formule 12 corrigée)
+        # DeltaCred = Cred(mi) - Average(Cred)
+        # Credm = Cred * Ent^(-DeltaCred)
+        avg_cred = 1.0 / k # Car somme Cred = 1
         Delta_Cred = Cred - avg_cred
         
-        # Modification des crédibilités avec fonction exponentielle
-        # Credm(mi) = Cred(mi) × Ent(mi)^(-ΔCred(mi))
-        Credm = np.zeros(n)
-        for i in range(n):
-            if Ent[i] > 0:
-                Credm[i] = Cred[i] * (Ent[i] ** (-Delta_Cred[i]))
-            else:
-                Credm[i] = Cred[i]
+        Cred_m = np.zeros(k)
+        for i in range(k):
+            # Attention : Ent[i] peut être 0 si masse certaine (ex: m({A})=1)
+            # 0^(-x) peut poser problème.
+            # Han ne spécifie pas le cas Ent=0, mais une certitude absolue est "bonne".
+            # Si Ent ~ 0, on peut le clipper à epsilon ou traiter à part.
+            base_ent = max(Ent[i], 1e-9) 
+            exponent = -Delta_Cred[i]
+            Cred_m[i] = Cred[i] * (base_ent ** exponent)
+            
+        # Normalisation finale des poids modifiés
+        sum_cred_m = np.sum(Cred_m)
+        Final_Weights = Cred_m / sum_cred_m if sum_cred_m > 0 else np.ones(k)/k
         
-        # Normalisation finale
-        Credmn = Credm / np.sum(Credm) if np.sum(Credm) > 0 else np.ones(n) / n
+        # 4. Moyenne pondérée
+        avg_mass = Mass(masses[0].frame, "Average_Han")
+        all_focals = set().union(*[m.get_all_masses().keys() for m in masses])
         
-        # Étape 3: Moyenne pondérée
-        weighted_mass = Mass(masses[0].frame, "m_weighted_Han")
-        
-        # Obtenir tous les sous-ensembles
-        all_hypotheses = set()
-        for mass in masses:
-            all_hypotheses.update(mass.get_all_masses().keys())
-            all_hypotheses.update(mass.get_explicit_zeros())
-        
-        # Calculer la moyenne pondérée
-        for hyp in all_hypotheses:
-            weighted_value = sum(
-                Credmn[i] * masses[i].get_mass(hyp)
-                for i in range(n)
-            )
-            weighted_mass.set_mass(hyp, weighted_value)
-        
-        # Étape 4: Appliquer Dempster n-1 fois
-        result = weighted_mass.copy()
-        result.name = f"Han({','.join(m.name for m in masses)})"
-        
-        for _ in range(n - 1):
-            result = self.dempster.combine_two(result, weighted_mass)
-        
-        # Préserver les zéros explicites
+        for focal in all_focals:
+            val = sum(Final_Weights[i] * masses[i].get_mass(focal) for i in range(k))
+            if val > 0:
+                avg_mass.set_mass(focal, val)
+                
+        # 5. Fusion N-1 fois
+        result = avg_mass.copy()
+        for _ in range(k - 1):
+            result = self.dempster.combine_two(result, avg_mass)
+            
         self._preserve_explicit_zeros(result, masses)
-        
         return result
 
 
