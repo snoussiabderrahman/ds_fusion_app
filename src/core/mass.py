@@ -18,10 +18,22 @@ class Mass:
         self._explicit_zeros: Set[FrozenSet[str]] = set()
     
     def set_mass(self, subset: FrozenSet[str], value: float):
-        """Assigne une masse à un sous-ensemble"""
-        if value < 0 or value > 1:
+        """Assigne une masse à un sous-ensemble (tolérance pour erreurs numériques)."""
+        eps = 1e-12  # tolérance pour arrondis flottants
+
+        # Rejeter uniquement si on est nettement en dehors de [0,1]
+        if value < -eps or value > 1.0 + eps:
             raise ValueError("La masse doit être entre 0 et 1")
-        
+
+        # Clamp / arrondir les petites imprécisions
+        if abs(value) <= eps:
+            value = 0.0
+        elif abs(value - 1.0) <= eps:
+            value = 1.0
+        else:
+            # Optionnel : réduire la précision pour éviter accumulation d'erreurs
+            value = float(value)
+
         if value > 0:
             self._assignments[subset] = value
             # Retirer de explicit_zeros si c'était là
@@ -33,10 +45,11 @@ class Mass:
             if subset in self._assignments:
                 del self._assignments[subset]
         else:
-            # Valeur négative, on retire tout
+            # Valeur négative (improbable ici), on retire tout
             if subset in self._assignments:
                 del self._assignments[subset]
             self._explicit_zeros.discard(subset)
+
     
     def get_mass(self, subset: FrozenSet[str]) -> float:
         """Récupère la masse d'un sous-ensemble"""
